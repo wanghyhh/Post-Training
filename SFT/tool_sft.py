@@ -715,54 +715,52 @@ def save_lora_adapter(model, adapter_dir: str) -> None:
 
 def compute_metrics(eval_preds) -> Dict[str, float]:
     """
-    计算评估指标：loss 和 PPL。
+    计算评估指标：loss 和 PPL（困惑度）。
 
-    NOTE: token 准确率统计必须 preds[:, :-1] 对比 labels[:, 1:]（因果 LM 位置 i 预测 i+1）
+    从模型输出的 logits 直接计算交叉熵损失，再求 exp 得到 PPL。
+    因果 LM 的标签位移：logits[:, :-1, :] 预测 labels[:, 1:]。
 
     Args:
         eval_preds: Trainer 的 EvalPrediction 对象 (predictions, label_ids)
+                    predictions 为 logits，shape (batch, seq_len, vocab_size)
 
     Returns:
-        包含指标名称和值的字典
+        包含 loss 和 ppl 的字典
     """
-    logger = get_logger("tool_eval")
-    preds, labels = eval_preds
+    logits, labels = eval_preds
 
-    # 处理 logits
-    if isinstance(preds, tuple):
-        preds = preds[0]
+    # 处理可能嵌套在 tuple 中的 logits
+    if isinstance(logits, tuple):
+        logits = logits[0]
 
-    preds = preds.argmax(axis=-1)
+    # 因果 LM 位移：位置 i 的 logits 预测位置 i+1 的 token
+    shift_logits = logits[:, :-1, :]   # (batch, seq_len-1, vocab_size)
+    shift_labels = labels[:, 1:]        # (batch, seq_len-1)
 
-    # 替换 -100 为 tokenizer 的忽略索引
-    labels = np.where(labels != -100, labels, preds)
+    # 用 log_softmax 计算交叉熵（数值稳定，避免 exp 溢出）
+    # log_softmax: log(exp(x_i) / sum(exp(x))) = x_i - log(sum(exp(x)))
+    log_probs = shift_logits - np.max(shift_logits, axis=-1, keepdims=True)  # 减去最大值防溢出
+    log_probs = log_probs - np.log(np.sum(np.exp(log_probs), axis=-1, keepdims=True))
 
-    # 计算 perplexity - 注意因果 LM 位置 i 预测 i+1
-    shift_predictions = preds[:, :-1]
-    shift_labels = labels[:, 1:]
+    # 取每个正确 token 位置的负对数概率
+    # 用 take_along_axis 按 label 索引取对应的 log_prob
+    batch_size, seq_len, vocab_size = log_probs.shape
+    # 将 labels 展平便于索引
+    label_indices = shift_labels.reshape(batch_size, seq_len, 1)
+    token_log_probs = np.take_along_axis(log_probs, label_indices, axis=-1).squeeze(-1)
 
-    min_length = min(shift_predictions.shape[1], shift_labels.shape[1])
-    shift_predictions = shift_predictions[:, :min_length]
-    shift_labels = shift_labels[:, :min_length]
+    # 只统计有效 token（ignore_index != -100）
+    valid_mask = (shift_labels != -100)
+    total_tokens = valid_mask.sum()
+    if total_tokens > 0:
+        total_nll = -(token_log_probs * valid_mask).sum()
+        avg_loss = total_nll / total_tokens
+        ppl = math.exp(avg_loss)
+    else:
+        avg_loss = 0.0
+        ppl = 0.0
 
-    total_tokens = 0
-    total_loss = 0.0
-
-    for pred, label in zip(shift_predictions, shift_labels):
-        valid_mask = label != -100
-        if valid_mask.sum() > 0:
-            total_tokens += valid_mask.sum()
-            loss = np.mean(
-                np.take_along_axis(
-                    np.log(np.maximum(np.exp(pred) / np.sum(np.exp(pred), axis=-1, keepdims=True), 1e-10), 1)
-                    , np.expand_dims(valid_mask.astype(int), axis=-1), axis=-1
-                )
-            )
-            total_loss += loss * valid_mask.sum()
-
-    ppl = math.exp(total_loss / max(total_tokens, 1)) if total_tokens > 0 else 0.0
-
-    return {"ppl": round(ppl, 4)}
+    return {"loss": round(avg_loss, 4), "ppl": round(ppl, 4)}
 
 
 # =============================================================================
