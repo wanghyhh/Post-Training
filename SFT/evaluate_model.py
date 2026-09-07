@@ -142,7 +142,8 @@ def evaluate_model(
 
         # 解码每条生成结果
         for j, ids in enumerate(generated_ids):
-            input_len = int(prompt_inputs["input_ids"][j].shape[0])
+            # 用 attention_mask 获取实际 prompt 长度（非 padding 长度）
+            input_len = int(prompt_inputs["attention_mask"][j].sum().item())
             gen_text = tokenizer.decode(ids[input_len:], skip_special_tokens=True)
             all_generated.append(gen_text)
 
