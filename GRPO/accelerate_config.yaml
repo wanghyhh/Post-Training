@@ -1,0 +1,55 @@
+# ====================================================
+# Accelerate 多卡训练配置文件
+# 用途：配置 accelerate launch 命令的多卡分布式训练参数
+# 说明：默认适配海光 DCU（4 卡单机），如需 NVIDIA GPU 请将 distributed_type 改为 MULTI_GPU
+# ====================================================
+
+# 计算环境类型： LOCAL_MACHINE 表示本地机器训练
+compute_environment: LOCAL_MACHINE
+
+# 是否开启调试模式（开启后会有更多详细日志）
+debug: false
+
+# 分布式类型：
+#   - MULTI_MUSA：海光 DCU（MUSA 架构）
+#   - MULTI_GPU：NVIDIA GPU
+#   - SINGLE_GPU：单卡
+distributed_type: MULTI_MUSA
+
+# 是否将 bfloat16 降级为 float16（DCU 通常支持 bf16）
+downcast_bf16: 'no'
+
+# 是否启用 CPU 亲和性（绑定进程到特定 CPU 核心）
+enable_cpu_affinity: false
+
+# GPU/MUSA 设备 ID（all 表示使用所有可用设备）
+gpu_ids: all
+
+# 机器排名（多机训练时使用，单机设为 0）
+machine_rank: 0
+
+# 主训练函数入口（训练脚本中的主函数名）
+main_training_function: main
+
+# 混合精度训练：
+#   - bf16：bfloat16（推荐，数值稳定性好）
+#   - fp16：float16
+#   - no：不使用混合精度
+mixed_precision: bf16
+
+# 机器数量（多机训练时使用，单机设为 1）
+num_machines: 1
+
+# 每个机器的进程数（等于 GPU 数量，4 卡设为 4）
+num_processes: 4
+
+# 分布式后端路由配置
+rdzv_backend: static
+
+# 是否使用 TPU
+tpu_use_cluster: false
+tpu_use_sudo: false
+tpu_env: []
+
+# 是否使用 CPU 训练（false 表示使用 GPU/MUSA）
+use_cpu: false
