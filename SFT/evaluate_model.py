@@ -43,12 +43,16 @@ def evaluate_model(
     max_length: int = 512,
 ) -> Dict[str, Any]:
     """
-    评估模型在测试集上的性能。
+    评估模型在测试集上的性能（批量推理优化版）。
+
+    将逐样本循环改为分批并行推理：
+    - Loss 计算：按 batch_size 分批 tokenize 并前向传播，加权平均
+    - 文本生成：按 batch_size 分批调用 model.generate()，充分利用 GPU 并行
 
     Args:
         model: 待评估的模型
         tokenizer: 对应的 tokenizer
-        test_dataset: 测试数据集（Dataset 对象）
+        test_dataset: 测试数据集（Dataset 对象，需含 messages 列）
         model_name: 模型名称（用于报告）
         batch_size: 评估 batch size
         max_length: 最大序列长度
@@ -56,61 +60,75 @@ def evaluate_model(
     Returns:
         包含评估指标和结果的字典:
         {
-            "model_name": str,
-            "num_samples": int,
-            "metrics": Dict[str, float],
-            "samples": List[Dict]  # 部分生成样例
+            "loss": float, "ppl": float, "num_samples": int,
+            "samples": List[Dict]  # 前 3 条生成样例
         }
     """
     logger = get_logger("evaluate")
-    metrics = {"loss": 0.0, "ppl": 0.0}
-    samples = []
-
     model.eval()
 
-    # 逐样本评估
+    # ---- 收集所有 messages 和样例元数据 ----
+    all_messages = []
+    sample_meta = []  # 前 3 条用于报告
+
     for i, example in enumerate(test_dataset):
         messages = example["messages"]
+        all_messages.append(messages)
 
-        # 获取用户问题（最后一条用户消息）
-        user_turn = None
-        for msg in reversed(messages):
-            if msg["role"] == "user":
-                user_turn = msg["content"]
-                break
+        if i < 3:
+            user_turn = None
+            for msg in reversed(messages):
+                if msg["role"] == "user":
+                    user_turn = msg["content"]
+                    break
+            sample_meta.append({
+                "messages": messages,
+                "user_turn": user_turn,
+                "reference": messages[-1]["content"] if messages[-1]["role"] == "assistant" else "",
+            })
 
-        if user_turn is None:
-            continue
+    num_samples = len(all_messages)
 
-        # 渲染完整对话文本用于计算 loss
-        full_text = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=False
-        )
+    # ---- 批量计算 Loss ----
+    total_loss = 0.0
+    total_tokens = 0
+
+    for i in range(0, num_samples, batch_size):
+        batch_msgs = all_messages[i:i + batch_size]
+        batch_texts = [
+            tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=False)
+            for msgs in batch_msgs
+        ]
         inputs = tokenizer(
-            full_text,
-            return_tensors="pt",
-            truncation=True,
-            max_length=max_length,
-            padding=False,
+            batch_texts, return_tensors="pt", truncation=True,
+            max_length=max_length, padding=True,
         )
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
-        # 计算 loss
         with torch.no_grad():
             outputs = model(**inputs, labels=inputs["input_ids"])
-            loss = outputs.loss.item()
-            metrics["loss"] += loss
+            # outputs.loss 是 batch 内非填充 token 的平均损失
+            batch_loss = outputs.loss.item()
+            # 统计本 batch 的有效 token 数（非填充）
+            batch_tokens = int(inputs["attention_mask"].sum().item())
+            total_loss += batch_loss * batch_tokens
+            total_tokens += batch_tokens
 
-        # 生成响应
-        prompt_text = tokenizer.apply_chat_template(
-            messages[:-1], tokenize=False, add_generation_prompt=True
-        )
+    avg_loss = total_loss / max(total_tokens, 1)
+    ppl = math.exp(avg_loss) if avg_loss < 100 else float("inf")  # 防止溢出
+
+    # ---- 批量生成文本 ----
+    all_generated = []
+    prompt_texts = [
+        tokenizer.apply_chat_template(msgs[:-1], tokenize=False, add_generation_prompt=True)
+        for msgs in all_messages
+    ]
+
+    for i in range(0, num_samples, batch_size):
+        batch_prompts = prompt_texts[i:i + batch_size]
         prompt_inputs = tokenizer(
-            prompt_text,
-            return_tensors="pt",
-            truncation=True,
-            max_length=max_length,
-            padding=False,
+            batch_prompts, return_tensors="pt", truncation=True,
+            max_length=max_length, padding=True,
         )
         prompt_inputs = {k: v.to(model.device) for k, v in prompt_inputs.items()}
 
@@ -122,43 +140,46 @@ def evaluate_model(
                 pad_token_id=tokenizer.pad_token_id,
             )
 
-        generated_text = tokenizer.decode(
-            generated_ids[0][prompt_inputs["input_ids"].shape[1]:],
-            skip_special_tokens=True,
+        # 解码每条生成结果
+        for j, ids in enumerate(generated_ids):
+            input_len = int(prompt_inputs["input_ids"][j].shape[0])
+            gen_text = tokenizer.decode(ids[input_len:], skip_special_tokens=True)
+            all_generated.append(gen_text)
+
+    # ---- 构建报告样例 ----
+    samples = []
+    for idx in range(min(3, len(sample_meta))):
+        sd = sample_meta[idx]
+        gen_text = all_generated[idx]
+        prompt_text = prompt_texts[idx]
+
+        # 后处理：移除尾部重复的角色标签
+        for prefix in ("assistant", "Assistant", "user", "User"):
+            while gen_text.lower().endswith(prefix.lower()):
+                gen_text = gen_text[: -len(prefix)].rstrip()
+
+        full_conversation = tokenizer.apply_chat_template(
+            sd["messages"], tokenize=False, add_generation_prompt=False,
+        )
+        model_input = tokenizer.apply_chat_template(
+            sd["messages"][:-1], tokenize=False, add_generation_prompt=True,
         )
 
-        # 后处理：移除尾部重复的角色标签（模型训练数据含角色标记时，生成会追加 "assistant" 作为下一轮前缀）
-        for prefix in ("assistant", "Assistant", "user", "User"):
-            while generated_text.lower().endswith(prefix.lower()):
-                generated_text = generated_text[: -len(prefix)].rstrip()
+        samples.append({
+            "question": sd["user_turn"],
+            "reference": sd["reference"],
+            "generated": gen_text,
+            "full_input": full_conversation,
+            "model_input": model_input,
+            "model_output": prompt_text + gen_text,
+        })
 
-        # 采样部分结果（保存原始完整输入和输出）
-        if i < 3:
-            # 完整对话文本（包含 system/user/assistant 所有角色标记）
-            full_conversation = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=False
-            )
-            # 模型生成前的 prompt（包含 system + user 角色标记）
-            model_input = tokenizer.apply_chat_template(
-                messages[:-1], tokenize=False, add_generation_prompt=True
-            )
-            # 模型生成的完整响应（含角色标签前缀）
-            full_output = prompt_text + generated_text
-
-            samples.append({
-                "question": user_turn,
-                "reference": messages[-1]["content"] if messages[-1]["role"] == "assistant" else "",
-                "generated": generated_text,
-                "full_input": full_conversation,
-                "model_input": model_input,
-                "model_output": full_output,
-            })
-
-    num_samples = len(test_dataset)
-    metrics["loss"] = round(metrics["loss"] / max(num_samples, 1), 4)
-    metrics["ppl"] = round(math.exp(metrics["loss"]), 4)
-    metrics["num_samples"] = num_samples
-    metrics["samples"] = samples
+    metrics = {
+        "loss": round(avg_loss, 4),
+        "ppl": round(ppl, 4),
+        "num_samples": num_samples,
+        "samples": samples,
+    }
 
     print_info(logger, f"  {model_name}: loss={metrics['loss']:.4f}, ppl={metrics['ppl']:.4f}")
 
