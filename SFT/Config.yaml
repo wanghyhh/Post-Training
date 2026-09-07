@@ -8,7 +8,8 @@
 # -----------------------------------------------------------------------------
 ModelConfig:
   # 基座模型名称或本地路径（Hugging Face Hub 模型名或磁盘路径）
-  model_name_or_path: "E:\\LLM\\models\\Qwen\\Qwen2-0___5B"
+  # model_name_or_path: "E:\\LLM\\models\\Qwen\\Qwen2-0___5B"
+  model_name_or_path: "D:\\FolderDirectory\\material\\CETC\\SelfProject\\TestPython\\models\\Qwen\\Qwen3-0___6B"
   # 令牌处理器最大上下文长度
   max_seq_length: 512
   # 是否使用 Flash Attention 2（若可用）
