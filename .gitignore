@@ -1,0 +1,14 @@
+/.xzcode
+/SFT/example
+/SFT/__pycache__
+/SFT/output/model_base
+/SFT/output/plots
+/SFT/output/__pycache__
+/SFT/output/checkpoints
+/SFT/output/eval
+/SFT/output/final_model
+/SFT/output/logs
+/SFT/output/lora_adapter
+/SFT/验收报告.md
+/SFT/tmp
+/GRPO/example
