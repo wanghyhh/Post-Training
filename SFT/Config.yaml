@@ -1,0 +1,146 @@
+# =============================================================================
+# 训练及评估配置文件
+# 所有超参数、模型/数据集路径、训练配置等均在此文件中定义
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 模型配置：指定待训练的基座模型及其基本设置
+# -----------------------------------------------------------------------------
+ModelConfig:
+  # 基座模型名称或本地路径（Hugging Face Hub 模型名或磁盘路径）
+  model_name_or_path: "E:\\LLM\\models\\Qwen\\Qwen2-0___5B"
+  # 令牌处理器最大上下文长度
+  max_seq_length: 512
+  # 是否使用 Flash Attention 2（若可用）
+  use_flash_attention: false
+
+# -----------------------------------------------------------------------------
+# 数据集配置：训练/测试数据路径、使用率、验证集划分比例
+# -----------------------------------------------------------------------------
+DataConfig:
+  # 训练数据集路径（相对于项目根目录或绝对路径）
+  train_data_path: "./example_data/data_train.jsonl"
+  # 测试数据集路径
+  test_data_path: "./example_data/data_test.jsonl"
+  # 训练数据集使用率（0~1），1 表示使用全部样本
+  train_data_usage: 1.0
+  # 测试数据集使用率（0~1），1 表示使用全部样本
+  test_data_usage: 1.0
+  # 从训练数据集中划分验证集的比例（0~1），例如 0.1 表示 10%
+  val_ratio: 0.1
+
+# -----------------------------------------------------------------------------
+# LoRA 配置：高效参数微调的适配器参数
+# -----------------------------------------------------------------------------
+LoRAConfig:
+  # LoRA 秩
+  r: 8
+  # LoRA 缩放系数（alpha），实际缩放 = alpha / r
+  lora_alpha: 16
+  # LoRA dropout
+  lora_dropout: 0.05
+  # 应用 LoRA 的目标模块（按正则匹配）
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+  # LoRA 模块类型："lora" 或 "fblora"
+  lora_type: "lora"
+  # 任务类型
+  task_type: "CAUSAL_LM"
+
+# -----------------------------------------------------------------------------
+# 训练配置：映射为 SFTConfig 的参数（Hugging Face Trainer）
+# -----------------------------------------------------------------------------
+TrainConfig:
+  # 输出目录
+  output_dir: "./output/checkpoints"
+  # 训练轮数
+  num_train_epochs: 5
+  # 每步训练样本数（batch size）
+  per_device_train_batch_size: 1
+  # 每步评估样本数
+  per_device_eval_batch_size: 1
+  # 梯度累积步数（有效 batch = per_device_train_batch_size * gradient_accumulation_steps）
+  gradient_accumulation_steps: 4
+  # 学习率
+  learning_rate: 2.0e-4
+  # 权重衰减
+  weight_decay: 0.01
+  # 学习率调度器类型
+  lr_scheduler_type: "cosine"
+  # 学习率预热比例
+  warmup_ratio: 0.05
+  # 最大梯度范数（梯度裁剪）
+  max_grad_norm: 1.0
+  # 精度类型："fp16" / "bf16" / "no"
+  fp16: false
+  bf16: true
+  # 数据加载 worker 数
+  dataloader_num_workers: 0
+  # 日志频率（步数）
+  logging_steps: 1
+  # 评估频率 no steps epoch
+  evaluation_strategy: "epoch"
+  eval_steps: 1
+  # 训练开始前是否先评估一次（对齐 example/sft/sft_train.py）
+  eval_on_start: true
+  # 检查点保存频率 no steps epoch
+  save_strategy: "best"
+  save_steps: 5
+  # 保存最大检查点数量
+  save_total_limit: 2
+  # 是否加载最优模型（评估阶段用）
+  load_best_model_at_end: true
+  # 指标名称（用于判断最优模型）
+  metric_for_best_model: "eval_loss"
+  # 随机种子
+  seed: 42
+  # 是否移除列
+  remove_unused_columns: false
+  # 数据预填充最大长度
+  packing: false
+
+# -----------------------------------------------------------------------------
+# 评估配置：基座模型与微调后模型的评估设置
+# -----------------------------------------------------------------------------
+EvalConfig:
+  # 是否评估基座模型
+  evaluate_base_model: true
+  # 是否评估微调后模型（如果存在检查点）
+  evaluate_fine_tuned_model: true
+  # 微调模型检查点路径（空字符串表示使用最新检查点）
+  fine_tuned_model_path: ""
+  # 评估输出目录
+  eval_output_dir: "./output/eval"
+  # 评估 batch size
+  eval_batch_size: 2
+
+# -----------------------------------------------------------------------------
+# 输出配置：各类输出文件的存储位置
+# -----------------------------------------------------------------------------
+OutputConfig:
+  # 输出根目录
+  base_dir: "./output"
+  # 训练日志输出目录（由程序自动生成）
+  train_log_dir: "./output/logs"
+  # 检查点保存目录（由程序自动生成）
+  checkpoint_dir: "./output/checkpoints"
+  # 评估报告输出目录
+  eval_dir: "./output/eval"
+  # 绘图输出目录
+  plot_dir: "./output/plots"
+
+# -----------------------------------------------------------------------------
+# 绘图配置：训练过程可视化参数
+# -----------------------------------------------------------------------------
+PlotConfig:
+  # 子图列数
+  ncols: 3
+  # 子图垂直间距
+  hspace: 0.4
+  # 子图水平间距
+  wspace: 0.3
+  # 总标题 Y 轴位置（0~1，1 表示顶部）
+  title_y: 0.95
+  # 从第几步开始绘制（跳过前 N 步，等价于 example 的 start_index）
+  start_index: 0
+  # 采样步长/滑动窗口大小（stride，>1 时降采样 + 绘制原始线）
+  stride: 10
