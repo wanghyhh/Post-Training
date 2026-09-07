@@ -191,6 +191,7 @@ PLOT_META = [
 def plot_training_curves(
     log_data: Dict[str, Dict[str, List]],
     output_path: str,
+    log_file: str = "",
     ncols: int = 3,
     hspace: float = 0.4,
     wspace: float = 0.3,
@@ -203,6 +204,7 @@ def plot_training_curves(
 
     Args:
         log_data: 从日志解析出的指标数据，键为指标名，值为包含 step/epoch/train/eval 的字典
+        log_file: 日志文件路径（用于图表标题）
         output_path: 输出 PNG 图片文件路径
         ncols: 子图列数
         hspace: 子图垂直间距
@@ -281,7 +283,7 @@ def plot_training_curves(
     plt.subplots_adjust(hspace=hspace, wspace=wspace)
 
     # 全局标题
-    log_name = Path(log_file).stem if 'log_file' in locals() else "training"
+    log_name = Path(log_file).stem if log_file else "training"
     fig.suptitle(f"SFT Training Logs: {log_name}", fontsize=16, fontweight='bold', y=title_y)
 
     # 输出
@@ -318,7 +320,6 @@ def main():
     print_info(logger, "=" * 60)
 
     # 固定读取统一接口日志 train_log.jsonl
-    global log_file
     log_dir = output_cfg["train_log_dir"]
     log_file = os.path.join(log_dir, "train_log.jsonl")
 
@@ -339,6 +340,7 @@ def main():
     plot_training_curves(
         log_data=log_data,
         output_path=output_path,
+        log_file=log_file,
         ncols=plot_cfg.get("ncols", 3),
         hspace=plot_cfg.get("hspace", 0.4),
         wspace=plot_cfg.get("wspace", 0.3),
