@@ -130,8 +130,8 @@ def load_and_preprocess_data(config: Dict[str, Any]) -> Dict[str, Dataset]:
     train_dataset = load_dataset(
         "json",
         data_files=data_config["train_data_path"],
-        split=f"train[:{int(data_config['train_data_usage'] * 100)}%]"
-        if data_config["train_data_usage"] < 1.0
+        split=f"train[:{int(data_config['train_data_ratio'] * 100)}%]"
+        if data_config["train_data_ratio"] < 1.0
         else "train",
     )
 
@@ -139,15 +139,15 @@ def load_and_preprocess_data(config: Dict[str, Any]) -> Dict[str, Dataset]:
     test_dataset = load_dataset(
         "json",
         data_files=data_config["test_data_path"],
-        split=f"train[:{int(data_config['test_data_usage'] * 100)}%]"
-        if data_config["test_data_usage"] < 1.0
+        split=f"train[:{int(data_config['test_data_ratio'] * 100)}%]"
+        if data_config["test_data_ratio"] < 1.0
         else "train",
     )
 
     # 从训练数据中划分验证集
-    val_ratio = data_config.get("val_ratio", 0.1)
-    if val_ratio > 0:
-        train_val_split = train_dataset.train_test_split(test_size=val_ratio, seed=42)
+    validation_split_ratio = data_config.get("validation_split_ratio", 0.1)
+    if validation_split_ratio > 0:
+        train_val_split = train_dataset.train_test_split(test_size=validation_split_ratio, seed=42)
         train_ds = train_val_split["train"]
         eval_ds = train_val_split["test"]
         print_info(
@@ -843,7 +843,7 @@ def create_trainer(
         save_strategy=train_config.get("save_strategy", "epoch"),
         save_steps=train_config.get("save_steps"),
         save_total_limit=train_config.get("save_total_limit", 3),
-        eval_strategy=train_config.get("evaluation_strategy", "epoch"),
+        eval_strategy=train_config.get("eval_strategy", "epoch"),
         eval_steps=train_config.get("eval_steps"),
         load_best_model_at_end=train_config.get("load_best_model_at_end", True),
         metric_for_best_model=train_config.get("metric_for_best_model", "eval_loss"),
@@ -857,7 +857,7 @@ def create_trainer(
         max_grad_norm=train_config.get("max_grad_norm", 1.0),
         # NOTE: transformers 5.x 中 save_safetensors 参数已移除
         # NOTE: warmup_ratio 已弃用，改用 warmup_steps
-        # NOTE: evaluation_strategy 已改为 eval_strategy
+        # NOTE: evaluation_strategy 已弃用，统一使用 eval_strategy
         # NOTE: packing 不再是 TrainingArguments 的参数
     )
 

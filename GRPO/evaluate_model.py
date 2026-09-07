@@ -653,7 +653,7 @@ def main():
     # -------------------------------------------
     # 确定模型路径和加载
     # -------------------------------------------
-    base_model_path = model_cfg.get("model_id", "")
+    base_model_path = model_cfg.get("model_name_or_path", "")
     model_to_use = args.model or base_model_path
 
     print(f"\n基座模型: {base_model_path}")

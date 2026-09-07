@@ -268,7 +268,7 @@ def main():
     print("  ✓ 配置加载完成")
 
     # 打印关键配置摘要
-    print(f"\n  基座模型: {model_cfg.get('model_id', 'N/A')}")
+    print(f"\n  基座模型: {model_cfg.get('model_name_or_path', 'N/A')}")
     # 兼容两种配置风格：平铺键名 vs 嵌套字典
     _train_ds = data_cfg.get("train_data_path") or data_cfg.get("train", {}).get("path", "")
     _valid_ds = data_cfg.get("valid_data_path") or data_cfg.get("valid", {}).get("path", "")
@@ -343,9 +343,9 @@ def main():
     system_prompt = model_cfg.get("system_prompt", "你是一个有用的 AI 助手。")
 
     # 先加载 tokenizer 用于预处理
-    print(f"  正在加载分词器: {model_cfg.get('model_id', 'N/A')}")
+    print(f"  正在加载分词器: {model_cfg.get('model_name_or_path', 'N/A')}")
     tokenizer = AutoTokenizer.from_pretrained(
-        model_cfg["model_id"],
+        model_cfg["model_name_or_path"],
         trust_remote_code=True,
         padding_side="left",
     )
@@ -440,7 +440,7 @@ def main():
         model_kwargs["load_in_4bit"] = True
 
     _, model = setup_lora(
-        model_name_or_path=model_cfg["model_id"],
+        model_name_or_path=model_cfg["model_name_or_path"],
         lora_config=lora_cfg,
         **model_kwargs,
     )

@@ -268,8 +268,8 @@ def main():
     test_dataset = load_dataset(
         "json",
         data_files=data_cfg["test_data_path"],
-        split=f"train[:{int(data_cfg['test_data_usage'] * 100)}%]"
-        if data_cfg["test_data_usage"] < 1.0
+        split=f"train[:{int(data_cfg['test_data_ratio'] * 100)}%]"
+        if data_cfg["test_data_ratio"] < 1.0
         else "train",
     )
     # 加载 tokenizer（用于格式化数据）
