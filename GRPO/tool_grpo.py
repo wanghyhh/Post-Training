@@ -9,6 +9,7 @@ import yaml
 import json
 import torch
 import traceback
+from datasets import load_dataset as hf_load_dataset
 from peft import LoraConfig, get_peft_model, PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -96,27 +97,25 @@ def load_dataset(data_path: str) -> tuple:
         FileNotFoundError: 数据文件不存在。
         ValueError: 数据格式错误（缺少必需字段或内容不完整）。
     """
-    import pandas as pd
-
-    df = pd.read_json(data_path, lines=True)
+    # 使用 datasets 库直接读取 JSONL（无需 pandas，与项目技术栈统一）
+    dataset = hf_load_dataset("json", data_files=data_path, split="train")
 
     # 支持两种格式：prompt + answer (+ reference)，或 prompt + reference
-    if "prompt" not in df.columns:
+    if "prompt" not in dataset.column_names:
         raise ValueError("数据格式错误：缺少必需字段 'prompt'")
 
-    has_answer = "answer" in df.columns
-    has_reference = "reference" in df.columns
+    has_answer = "answer" in dataset.column_names
+    has_reference = "reference" in dataset.column_names
 
+    prompts = dataset["prompt"]
     if has_answer and has_reference:
         # 完整格式: prompt + answer + reference
-        prompts = df["prompt"].tolist()
-        answers = df["answer"].tolist()
-        references = df["reference"].tolist()
+        answers = dataset["answer"]
+        references = dataset["reference"]
     elif not has_answer and has_reference:
         # 精简格式: prompt + reference（无 answer）
-        prompts = df["prompt"].tolist()
-        answers = [""] * len(df)
-        references = df["reference"].tolist()
+        answers = [""] * len(dataset)
+        references = dataset["reference"]
     else:
         raise ValueError(
             "数据格式错误：至少需要 'reference' 字段\n"
@@ -136,16 +135,16 @@ def load_dataset(data_path: str) -> tuple:
 # ================== 数据集验证 ==================
 
 
-def validate_dataset_format(df) -> dict:
+def validate_dataset_format(dataset) -> dict:
     """
-    验证数据集格式。
+    验证数据集格式（接受 datasets.Dataset 或类列表对象）。
 
     支持两种格式：
         1. 完整格式: {prompt, answer, reference}
         2. 精简格式: {prompt, reference}
 
     Args:
-        df: pandas DataFrame 数据。
+        dataset: datasets.Dataset 对象或类列表字典。
 
     Returns:
         验证结果字典，包含 passed、issues、missing_fields、summary 等字段。
@@ -157,14 +156,18 @@ def validate_dataset_format(df) -> dict:
         "summary": {},
     }
 
-    if "prompt" not in df.columns:
+    # 兼容 datasets.Dataset 和普通 dict 两种类型
+    columns = getattr(dataset, "column_names", list(dataset.keys()) if isinstance(dataset, dict) else [])
+    total = len(dataset)
+
+    if "prompt" not in columns:
         result["missing_fields"].append("prompt")
         result["issues"].append("缺少必需字段 'prompt'")
         result["passed"] = False
         return result
 
-    has_answer = "answer" in df.columns
-    has_reference = "reference" in df.columns
+    has_answer = "answer" in columns
+    has_reference = "reference" in columns
 
     if not has_reference:
         result["missing_fields"].append("reference")
@@ -172,34 +175,27 @@ def validate_dataset_format(df) -> dict:
         result["passed"] = False
         return result
 
-    if has_answer:
-        # 完整格式: prompt + answer + reference
-        total = len(df)
-        valid_count = sum(
-            1 for _, row in df.iterrows()
-            if row.get("prompt") and row.get("answer") and row.get("reference")
-            and isinstance(row["prompt"], str) and isinstance(row["answer"], str) and isinstance(row["reference"], str)
-        )
-        result["summary"] = {
-            "total_rows": total,
-            "valid_rows": valid_count,
-            "invalid_rows": total - valid_count,
-            "format": "完整格式 (prompt + answer + reference)",
-        }
-    else:
-        # 精简格式: prompt + reference
-        total = len(df)
-        valid_count = sum(
-            1 for _, row in df.iterrows()
-            if row.get("prompt") and row.get("reference")
-            and isinstance(row["prompt"], str) and isinstance(row["reference"], str)
-        )
-        result["summary"] = {
-            "total_rows": total,
-            "valid_rows": valid_count,
-            "invalid_rows": total - valid_count,
-            "format": "精简格式 (prompt + reference)",
-        }
+    # 逐行校验
+    valid_count = 0
+    for i in range(total):
+        row = dataset[i]
+        prompt_ok = bool(row.get("prompt")) and isinstance(row["prompt"], str)
+        ref_ok = bool(row.get("reference")) and isinstance(row["reference"], str)
+        if has_answer:
+            answer_ok = bool(row.get("answer")) and isinstance(row["answer"], str)
+            if prompt_ok and answer_ok and ref_ok:
+                valid_count += 1
+        else:
+            if prompt_ok and ref_ok:
+                valid_count += 1
+
+    fmt_label = "完整格式 (prompt + answer + reference)" if has_answer else "精简格式 (prompt + reference)"
+    result["summary"] = {
+        "total_rows": total,
+        "valid_rows": valid_count,
+        "invalid_rows": total - valid_count,
+        "format": fmt_label,
+    }
 
     if valid_count < total:
         result["passed"] = False
