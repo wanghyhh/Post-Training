@@ -124,6 +124,10 @@ def evaluate_model(
         for msgs in all_messages
     ]
 
+    # 生成时必须使用 left padding（decoder-only 架构要求，否则影响生成质量）
+    original_padding_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
+
     for i in range(0, num_samples, batch_size):
         batch_prompts = prompt_texts[i:i + batch_size]
         prompt_inputs = tokenizer(
@@ -144,8 +148,15 @@ def evaluate_model(
         for j, ids in enumerate(generated_ids):
             # 用 attention_mask 获取实际 prompt 长度（非 padding 长度）
             input_len = int(prompt_inputs["attention_mask"][j].sum().item())
-            gen_text = tokenizer.decode(ids[input_len:], skip_special_tokens=True)
+            # 先保留特殊 token 解码，再手动清理尾部 EOS/PAD
+            gen_text = tokenizer.decode(ids[input_len:], skip_special_tokens=False)
+            # 去除尾部 EOS token（模型正常结束标志）
+            eos_token = tokenizer.eos_token
+            if eos_token and gen_text.endswith(eos_token):
+                gen_text = gen_text[: -len(eos_token)].rstrip()
             all_generated.append(gen_text)
+
+    tokenizer.padding_side = original_padding_side
 
     # ---- 构建报告样例 ----
     samples = []
