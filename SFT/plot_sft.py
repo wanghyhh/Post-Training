@@ -147,21 +147,29 @@ def parse_train_log(log_file: str) -> Dict[str, Dict[str, List]]:
 # 数据后处理：stride 降采样平滑
 # =============================================================================
 
-def smooth_data_stride(data: List[float], stride: int = 10) -> Tuple[List[float], List[float]]:
+def smooth_data_stride(data: List[Optional[float]], stride: int = 10) -> Tuple[List[float], List[float]]:
     """
     滑动窗口降采样平滑（对齐 example 风格）。
 
+    内部自动过滤 None 值，调用方无需预先过滤。
+
     Args:
-        data: 原始数据列表
+        data: 原始数据列表（可含 None，内部自动过滤）
         stride: 滑动窗口大小（降采样步长）
 
     Returns:
-        (smoothed_epochs, smoothed_vals) 降采样后的数据
+        (smoothed_indices, smoothed_vals) 降采样后的索引和值
     """
-    if stride <= 1 or len(data) < stride:
-        return list(range(len(data))), data
+    # 过滤 None 值，保留有效数据及其原始索引
+    valid = [(i, v) for i, v in enumerate(data) if v is not None]
+    if not valid:
+        return [], []
 
-    arr = np.array(data)
+    indices, values = zip(*valid)
+    if stride <= 1 or len(values) < stride:
+        return list(indices), list(values)
+
+    arr = np.array(values, dtype=float)
     smoothed_vals = []
     smoothed_indices = []
 
@@ -169,7 +177,7 @@ def smooth_data_stride(data: List[float], stride: int = 10) -> Tuple[List[float]
         window = arr[i : i + stride]
         if len(window) > 0:
             smoothed_vals.append(float(np.mean(window)))
-            smoothed_indices.append(i)
+            smoothed_indices.append(indices[i])  # 保留原始索引
 
     return smoothed_indices, smoothed_vals
 
