@@ -7,11 +7,21 @@
 # ==================== 模型配置 ====================
 ModelConfig:
   # 基座模型路径（本地绝对路径）
-  model_name_or_path: "E:\\LLM\\models\\Qwen\\Qwen2-0___5B"
+  # model_name_or_path: "E:\\LLM\\models\\Qwen\\Qwen2-0___5B"
+  model_name_or_path: "D:\\FolderDirectory\\material\\CETC\\SelfProject\\TestPython\\models\\Qwen\\Qwen3___5-2B"
   # 最大输入 token 数（用于生成阶段截断）
   max_input_tokens: 2048
   # 设备设置："auto" 自动选择，"cuda:0" 指定 GPU，"cpu" CPU
   device: "auto"
+  # 系统提示词（构造 chat template 时作为 system 角色内容）
+  system_prompt: "你是一个有用的 AI 助手。"
+  # 模型权重精度，可选："bfloat16" / "float16" / "float32"
+  # 需与 accelerate_config.yaml 的 mixed_precision 保持一致
+  torch_dtype: "bfloat16"
+  # 是否 8bit 量化加载（显存受限时启用，与 4bit 互斥）
+  load_in_8bit: false
+  # 是否 4bit 量化加载（显存受限时启用，与 8bit 互斥）
+  load_in_4bit: false
 
 # ==================== 数据集配置 ====================
 DataSetConfig:
@@ -24,13 +34,13 @@ DataSetConfig:
   # 测试数据集使用率（0~1），1 表示使用 100%
   test_data_ratio: 1.0
   # 从训练数据集中划分验证集的占比（0~1），剩余部分作为实际训练集
-  validation_split_ratio: 0.1
+  validation_split_ratio: 0.4
 
 # ==================== 训练配置 ====================
 # 以下配置项将整体传入 GRPOConfig(**TrainConfig, ...)
 TrainConfig:
-  # 输出目录（检查点、日志等保存位置）
-  output_dir: "output"
+  # 输出目录（训练检查点保存位置，与 OutputConfig.checkpoint_dir 保持一致）
+  output_dir: "output/checkpoints"
   # 学习率
   learning_rate: 5.0e-6
   # Adam 优化器参数
@@ -46,7 +56,7 @@ TrainConfig:
   # KL 散度惩罚系数（控制与参考模型的偏离程度）
   beta: 0.01
   # 每个 prompt 生成的样本数
-  num_generations: 4
+  num_generations: 2
   # 是否对组内奖励进行归一化
   scale_rewards: true
   # 单次生成最大 token 数
@@ -54,10 +64,10 @@ TrainConfig:
   # ===== Batch 配置 =====
   # 单设备训练 batch 大小（需能被 num_generations 整除）
   per_device_train_batch_size: 2
-  # 单设备评估 batch 大小（需能被 num_generations=4 整除）
-  per_device_eval_batch_size: 4
+  # 单设备评估 batch 大小（需能被 num_generations 整除）
+  per_device_eval_batch_size: 2
   # 梯度累积步数
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 2
   # ===== 训练控制 =====
   # 训练轮次
   num_train_epochs: 1
@@ -65,8 +75,8 @@ TrainConfig:
   logging_steps: 1
   # 是否禁用外部报告器（如 wandb/tensorboard）
   report_to: []
-  # 是否显示进度条
-  disable_tqdm: false
+  # 是否显示进度条（置 true 可在 Trainer 构造前生效，避免进度条覆盖 stdout 日志）
+  disable_tqdm: true
   # ===== 生成控制参数 =====
   # 采样温度（0~1，越低越确定）
   temperature: 0.8

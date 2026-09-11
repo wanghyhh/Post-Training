@@ -11,6 +11,7 @@
 import os
 import sys
 import json
+import random
 import argparse
 import time
 import torch
@@ -20,7 +21,7 @@ from datetime import datetime
 
 # ============================================================
 # 依赖导入区
-# ★ Windows conda 环境 0xC0000005 crash 防护
+# ★ Windows 平台 0xC0000005 crash 防护
 # ============================================================
 import pandas  # noqa: F401
 
@@ -41,6 +42,7 @@ from tool_grpo import (
     make_reward_function,
     merge_and_unload,
     load_hf_model,
+    resolve_torch_dtype,
 )
 from reward_function import GRPORewardFunction
 
@@ -60,6 +62,103 @@ def safe_stat(values: list) -> float:
         列表平均值，空列表返回 0
     """
     return float(np.mean(values)) if values else 0.0
+
+
+# EvalConfig 键名候选表
+# 背景：Config.yaml 的 EvalConfig 使用带 eval_ 前缀的键名
+# （max_eval_completion_length / eval_temperature / eval_top_p / eval_batch_size），
+# 而旧代码用 .get("max_completion_length") / .get("temperature") 等不带前缀的键名读取，
+# 键名永远不匹配 → 参数静默回退代码内默认值（表现为配置写 256 却实际生成 512）。
+# 这里集中声明候选键（按优先级排列），既兼容带前缀写法，也兼容旧的不带前缀写法。
+EVAL_KEY_CANDIDATES = {
+    "max_new_tokens": ["max_eval_completion_length", "max_completion_length", "max_new_tokens"],
+    "temperature": ["eval_temperature", "temperature"],
+    "top_p": ["eval_top_p", "top_p"],
+    "max_length": ["eval_max_length", "max_length"],
+    "batch_size": ["eval_batch_size", "batch_size"],
+    "num_generations": ["num_generations_per_prompt", "num_generations"],
+    "test_data_path": ["test_data_path"],
+}
+
+
+def pick_config(config: dict, key: str, default=None):
+    """
+    按 EVAL_KEY_CANDIDATES 中的候选顺序从配置字典取值。
+
+    空字符串与 None 均视为"未配置"（Config.yaml 中常见 `test_data_path: ""` 这类占位），
+    继续尝试下一个候选键；全部未命中时返回 default。
+
+    Args:
+        config: 已加载的配置字典（如 EvalConfig）
+        key: EVAL_KEY_CANDIDATES 中的逻辑键名
+        default: 所有候选键都未命中时的回退值
+
+    Returns:
+        命中的配置值或 default
+    """
+    for candidate in EVAL_KEY_CANDIDATES.get(key, [key]):
+        if candidate in config:
+            value = config[candidate]
+            if value is None:
+                continue
+            if isinstance(value, str) and value.strip() == "":
+                continue
+            return value
+    return default
+
+
+def get_reward_component(reward_fn, name: str, size: int) -> np.ndarray:
+    """
+    从奖励函数缓存中安全取出指定分项奖励数组。
+
+    奖励函数内部用 self.rewards 缓存各分项（length_rewards / match_rewards），
+    初始值为 None、且长度理论上应与本次生成条数一致。此处做两级防御：
+    缓存缺失（None）或长度不匹配时返回全 0 数组，保证后续统计不会崩。
+
+    Args:
+        reward_fn: GRPORewardFunction 实例
+        name: 缓存键名（如 "match_rewards"）
+        size: 期望的样本条数
+
+    Returns:
+        shape 为 (size,) 的 float32 数组
+    """
+    cached = reward_fn.rewards.get(name)
+    if cached is None:
+        return np.zeros(size, dtype=np.float32)
+    arr = np.asarray(cached, dtype=np.float32).reshape(-1)
+    if arr.shape[0] != size:
+        return np.zeros(size, dtype=np.float32)
+    return arr
+
+
+def format_component_table(reward_components: dict) -> list:
+    """
+    将奖励分项字典渲染为 Markdown 表格行。
+
+    动态遍历 reward_components，新增分项（如未来的 syntax）会自动出现在报告中，
+    不再像旧实现那样硬编码 length 并对永不存在的 syntax 做死代码判断。
+
+    Args:
+        reward_components: metrics["reward_components"] 字典
+
+    Returns:
+        Markdown 行列表（表头 + 数据行）
+    """
+    # 分项英文键 → 中文展示名映射
+    labels = {"length": "长度奖励", "match": "匹配奖励", "syntax": "语法奖励"}
+    lines = [
+        "| 分项 | 权重 | 平均值 | 标准差 | 最小值 | 最大值 | 加权贡献 |",
+        "|------|------|--------|--------|--------|--------|----------|",
+    ]
+    for comp_key, comp_val in reward_components.items():
+        label = labels.get(comp_key, comp_key)
+        lines.append(
+            f"| {label} | {comp_val.get('weight', 0):.2f} | {comp_val.get('mean', 0):.4f} | "
+            f"{comp_val.get('std', 0):.4f} | {comp_val.get('min', 0):.4f} | "
+            f"{comp_val.get('max', 0):.4f} | {comp_val.get('weighted_mean', 0):.4f} |"
+        )
+    return lines
 
 
 # ============================================================
@@ -110,12 +209,6 @@ def evaluate_model(
 
     prompts = test_dataset["prompt"]
     references = test_dataset["reference"] if "reference" in test_dataset.column_names else test_dataset["answer"]
-
-    # 计算 reference token 长度
-    ref_token_lengths = []
-    for ref_text in references:
-        ref_tokens = tokenizer(ref_text, return_tensors="pt", add_special_tokens=False)
-        ref_token_lengths.append(len(ref_tokens.input_ids[0]))
 
     # -------------------------------------------
     # 模型准备
@@ -234,8 +327,10 @@ def evaluate_model(
     )
 
     total_rewards_list = all_rewards.tolist()
-    length_arr = np.array(reward_fn.rewards.get("length_rewards", np.zeros(len(all_completions))))
-    match_arr = np.array(reward_fn.rewards.get("match_rewards", np.zeros(len(all_completions))))
+    # 总奖励 = Σ(权重 × 分项)，必须把每个分项都取出，才能核对与展示。
+    # 此前 match_rewards 取出来后从未使用（报告缺失 match 分项），此处统一获取。
+    length_arr = get_reward_component(reward_fn, "length_rewards", len(all_completions))
+    match_arr = get_reward_component(reward_fn, "match_rewards", len(all_completions))
 
     # 计算每条生成的 token 长度
     completion_lengths = [
@@ -261,20 +356,25 @@ def evaluate_model(
     }
 
     # Pass@k 计算
-    # 将每条生成的奖励排序，取 top-1 作为"正确"的标准
-    # Pass@k = (k 次生成中至少有一次奖励 > 0.5 的比例)
+    # 对每个 prompt 的 n 次生成，取前 k 次中至少有一条奖励 > 0.5 的比例。
+    # k 从 1 到 num_generations 全覆盖，不硬编码固定档位。
     all_generations_correct = [r > 0.5 for r in total_rewards_list]
     pass_at_k = {}
-    for k in [1, 3, 5, 10]:
+    pass_at_k_counts = {}  # 各档位的通过 prompt 数（供报告展示具体值，而非只有百分比）
+    for k in range(1, num_generations + 1):
         if total_prompts == 0:
             pass_at_k[f"pass@{k}"] = 0.0
+            pass_at_k_counts[f"pass@{k}"] = 0
             continue
         correct_count = 0
         for p in range(total_prompts):
-            gens = all_generations_correct[p * num_generations : (p + 1) * num_generations]
+            # 取该 prompt 的前 k 次生成，其中至少一次达标即算通过
+            start = p * num_generations
+            gens = all_generations_correct[start : start + k]
             if any(gens):
                 correct_count += 1
         pass_at_k[f"pass@{k}"] = correct_count / total_prompts
+        pass_at_k_counts[f"pass@{k}"] = correct_count
 
     # 每 prompt 平均奖励
     prompt_level_rewards = [
@@ -312,16 +412,24 @@ def evaluate_model(
     print(f"  {'每 prompt 平均奖励标准差':<30} {avg_prompt_std:>20.4f}")
     print(f"  {'生成速度':<30} {tokens_per_sec:>20.2f} tokens/s")
 
-    print(f"\n  Pass@k 指标:")
+    print(f"\n  Pass@k 指标 (k 覆盖 1~{num_generations}，判定: 组内至少一条奖励 > 0.5):")
     for k_str, val in sorted(pass_at_k.items(), key=lambda x: int(x[0].split("@")[1])):
-        print(f"    {k_str:<25} {val * 100:>8.2f}%")
+        print(f"    {k_str:<12} 通过 {pass_at_k_counts[k_str]:>3}/{total_prompts:<3} ({val * 100:>6.2f}%)")
 
     print(f"\n  奖励分布:")
     for stat_name, stat_val in reward_distribution.items():
         print(f"    {stat_name:<10} {stat_val:>10.4f}")
 
-    print(f"\n  奖励分项:")
-    print(f"    长度奖励: 平均={float(np.mean(length_arr)):.4f} (±{float(np.std(length_arr)):.4f})")
+    # 奖励分项输出：同时展示各分项的原始平均值与加权贡献（权重 × 平均分项值），
+    # 便于直接看出各分项对总奖励的拉动作用（例如 match 全 0 会直接暴露）。
+    w_length = reward_fn.weights.get("length", 0.0)
+    w_match = reward_fn.weights.get("match", 0.0)
+    length_mean, length_std = float(np.mean(length_arr)), float(np.std(length_arr))
+    match_mean, match_std = float(np.mean(match_arr)), float(np.std(match_arr))
+
+    print(f"\n  奖励分项 (权重 length={w_length}, match={w_match}):")
+    print(f"    {'长度奖励':<12} 平均={length_mean:.4f}  ±{length_std:.4f}  加权贡献={w_length * length_mean:.4f}")
+    print(f"    {'匹配奖励':<12} 平均={match_mean:.4f}  ±{match_std:.4f}  加权贡献={w_match * match_mean:.4f}")
 
     # -------------------------------------------
     # 构建结果字典
@@ -341,6 +449,7 @@ def evaluate_model(
             "avg_reward": avg_reward,
             "reward_std": reward_std,
             "pass_at_k": pass_at_k,
+            "pass_at_k_counts": pass_at_k_counts,
             "avg_length": avg_length,
             "min_length": min_length,
             "max_length": max_length,
@@ -349,8 +458,20 @@ def evaluate_model(
             "generation_speed": tokens_per_sec,
             "reward_components": {
                 "length": {
-                    "mean": float(np.mean(length_arr)),
-                    "std": float(np.std(length_arr)),
+                    "mean": length_mean,
+                    "std": length_std,
+                    "min": float(np.min(length_arr)),
+                    "max": float(np.max(length_arr)),
+                    "weight": w_length,
+                    "weighted_mean": w_length * length_mean,
+                },
+                "match": {
+                    "mean": match_mean,
+                    "std": match_std,
+                    "min": float(np.min(match_arr)),
+                    "max": float(np.max(match_arr)),
+                    "weight": w_match,
+                    "weighted_mean": w_match * match_mean,
                 },
             },
             "weights": reward_fn.weights,
@@ -363,6 +484,7 @@ def evaluate_model(
                 {
                     "total": total_rewards_list[i],
                     "length": float(length_arr[i]),
+                    "match": float(match_arr[i]),
                     "prompt_idx": i // num_generations,
                     "generation_idx": i % num_generations,
                     "token_length": completion_lengths[i],
@@ -451,15 +573,22 @@ def save_eval_report(eval_result: dict, output_dir: str, tokenizer=None, system_
         "",
         "### Pass@k",
         "",
-        "| 指标 | 通过率 |",
-        "|------|------|",
+        f"> 通过判定：单个 prompt 的前 k 次生成中，至少一条的加权总奖励 > 0.5 记为通过。k 从 1 到 {num_gen} 全覆盖。",
+        "",
+        "| 指标 | 通过数 | 通过率 |",
+        "|------|--------|--------|",
     ]
 
+    # 从 metrics 中取 pass_at_k 与 pass_at_k_counts（新增的 counts 字段），
+    # 按 k 升序输出；若 counts 缺失（旧版 JSON 不兼容）则只显示百分比
+    pass_counts = metrics.get("pass_at_k_counts", {})
     for k_key, k_val in sorted(
         metrics.get("pass_at_k", {}).items(),
         key=lambda x: int(x[0].split("@")[1]),
     ):
-        md_lines.append(f"| {k_key} | {k_val * 100:.2f}% |")
+        cnt = pass_counts.get(k_key, "?")
+        total_prompts = params.get("test_size", 0)
+        md_lines.append(f"| {k_key} | {cnt} / {total_prompts} | {k_val * 100:.2f}% |")
 
     # 奖励分布
     dist = metrics.get("reward_distribution", {})
@@ -477,20 +606,31 @@ def save_eval_report(eval_result: dict, output_dir: str, tokenizer=None, system_
         "",
     ])
 
-    # 奖励分项统计
+    # 奖励分项统计：动态渲染（含权重与加权贡献），新增分项无需改动报告代码
     reward_comps = metrics.get("reward_components", {})
-    length_comp = reward_comps.get("length", {})
     md_lines.extend([
         "### 奖励分项统计",
         "",
-        "| 分项 | 平均值 | 标准差 |",
-        "|------|--------|--------|",
-        f"| 长度奖励 | {length_comp.get('mean', 0):.4f} | {length_comp.get('std', 0):.4f} |",
+        *format_component_table(reward_comps),
         "",
     ])
-    syntax_comp = reward_comps.get("syntax", {})
-    if syntax_comp:
-        md_lines.append(f"| 语法奖励 | {syntax_comp.get('mean', 0):.4f} | {syntax_comp.get('std', 0):.4f} |")
+
+    # 奖励明细表：逐条列出全部生成的总奖励与各分项奖励（不截断到前 5 条），
+    # 便于核对"总奖励 = Σ(权重 × 分项)"这一等式，并定位拉低总奖励的分项
+    md_lines.extend([
+        "### 奖励明细（全部生成）",
+        "",
+        "| # | Prompt# | 生成# | 总奖励 | 长度奖励 | 匹配奖励 | Token 长度 |",
+        "|---|---------|-------|--------|----------|----------|------------|",
+    ])
+    for i, item in enumerate(rewards_detail):
+        prompt_idx = item.get("prompt_idx", i // num_gen)
+        gen_idx = item.get("generation_idx", i % num_gen)
+        md_lines.append(
+            f"| {i + 1} | {prompt_idx + 1} | {gen_idx + 1} | {item.get('total', 0):.4f} | "
+            f"{item.get('length', 0):.4f} | {item.get('match', 0):.4f} | {item.get('token_length', 0)} |"
+        )
+    md_lines.append("")
 
     # 生成样例展示（工作文档第 3.7.78 条：展示完整 chat template 渲染结果）
     md_lines.extend([
@@ -552,6 +692,7 @@ def save_eval_report(eval_result: dict, output_dir: str, tokenizer=None, system_
                     f"|------|------|",
                     f"| 总奖励 | {r['total']:.4f} |",
                     f"| 长度奖励 | {r.get('length', 0):.4f} |",
+                    f"| 匹配奖励 | {r.get('match', 0):.4f} |",
                     f"| Token 长度 | {r.get('token_length', 0)} |",
                     "",
                     f"**生成内容**:",
@@ -596,14 +737,14 @@ def parse_args():
     parser.add_argument(
         "--num-generations",
         type=int,
-        default=4,
-        help="每个 prompt 的生成次数（默认 4）",
+        default=None,
+        help="每个 prompt 的生成次数（默认从 EvalConfig.num_generations_per_prompt 读取）",
     )
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=4,
-        help="推理 batch 大小（默认 4）",
+        default=None,
+        help="推理 batch 大小（默认从 EvalConfig.eval_batch_size 读取）",
     )
     parser.add_argument(
         "--device",
@@ -649,6 +790,8 @@ def main():
     lora_cfg = all_config.get("LoraParamConfig", {})
     reward_cfg = all_config.get("RewardFuncConfig", {})
     eval_cfg = all_config.get("EvalConfig", {})
+    # OutputConfig 提供评估结果输出目录（下方 output_dir 解析依赖此变量）
+    output_cfg = all_config.get("OutputConfig", {})
 
     # -------------------------------------------
     # 确定模型路径和加载
@@ -680,7 +823,8 @@ def main():
         base_model, _ = load_hf_model(
             base_model_path,
             trust_remote_code=True,
-            torch_dtype=torch.float16,
+            # transformers 5.x 使用 dtype（torch_dtype 已弃用）；精度取自 ModelConfig
+            dtype=resolve_torch_dtype(model_cfg.get("torch_dtype", "bfloat16")),
         )
         model = PeftModel.from_pretrained(base_model, args.checkpoint)
     else:
@@ -691,8 +835,9 @@ def main():
     # -------------------------------------------
     # 加载测试数据
     # -------------------------------------------
+    # 优先级：命令行 --test-data > EvalConfig.test_data_path（非空时）> DataSetConfig.test_data_path
     # 兼容两种配置风格：平铺键名 test_data_path vs 嵌套字典 test.path
-    test_path = getattr(args, "test_data", None)
+    test_path = args.test_data or pick_config(eval_cfg, "test_data_path")
     if not test_path:
         test_path = data_cfg.get("test_data_path", "")
     if not test_path:
@@ -707,6 +852,18 @@ def main():
 
     print(f"加载测试数据: {test_path}")
     prompts, answers, references = load_dataset(test_path)
+
+    # 应用测试数据使用率（工作文档 3.1.6）：随机降采样，固定种子保证可复现
+    test_data_ratio = data_cfg.get("test_data_ratio", 1.0)
+    if test_data_ratio is not None and 0 < test_data_ratio < 1.0:
+        keep = max(1, int(round(len(prompts) * test_data_ratio)))
+        if keep < len(prompts):
+            idx = sorted(random.Random(42).sample(range(len(prompts)), keep))
+            prompts = [prompts[i] for i in idx]
+            answers = [answers[i] for i in idx]
+            references = [references[i] for i in idx]
+            print(f"  测试集使用率 {test_data_ratio} → 随机保留 {keep} 条样本")
+
     test_data = Dataset.from_dict({
         "prompt": prompts,
         "answer": answers,
@@ -745,20 +902,40 @@ def main():
 
     # -------------------------------------------
     # 构建评估参数
+    # 修复：统一走 pick_config，兼容 EvalConfig 的 eval_ 前缀键名
+    # （max_eval_completion_length / eval_temperature / eval_top_p），
+    # 避免键名不匹配导致参数静默回退代码内默认值
     # -------------------------------------------
     eval_params = {
-        "max_new_tokens": eval_cfg.get("max_new_tokens", eval_cfg.get("max_completion_length", 512)),
-        "max_completion_length": eval_cfg.get("max_completion_length", 512),
-        "temperature": eval_cfg.get("temperature", 0.7),
-        "top_p": eval_cfg.get("top_p", 0.9),
-        "max_length": eval_cfg.get("max_length", 4096),
+        "max_new_tokens": pick_config(eval_cfg, "max_new_tokens", 512),
+        "max_completion_length": pick_config(eval_cfg, "max_new_tokens", 512),
+        "temperature": pick_config(eval_cfg, "temperature", 0.7),
+        "top_p": pick_config(eval_cfg, "top_p", 0.9),
+        # 输入截断长度：优先取 EvalConfig，其次 ModelConfig.max_input_tokens
+        "max_length": pick_config(eval_cfg, "max_length", pick_config(model_cfg, "max_length", model_cfg.get("max_input_tokens", 4096))),
     }
+
+    # 命令行参数（--batch-size / --num-generations）显式给出时优先，
+    # 否则读取 EvalConfig（eval_batch_size / num_generations_per_prompt）
+    batch_size = args.batch_size or pick_config(eval_cfg, "batch_size", 4)
+    num_generations = args.num_generations or pick_config(eval_cfg, "num_generations", 4)
+
+    print(
+        f"评估参数: max_new_tokens={eval_params['max_new_tokens']}, "
+        f"temperature={eval_params['temperature']}, top_p={eval_params['top_p']}, "
+        f"batch_size={batch_size}, num_generations={num_generations}"
+    )
 
     # -------------------------------------------
     # 执行评估
     # -------------------------------------------
-    # 从 OutputConfig 读取评估输出路径
-    output_dir = args.output_dir or output_cfg.get("eval_dir") or os.path.join(_SCRIPT_DIR, "output", "eval")
+    # 从 OutputConfig 读取评估输出路径；兼容 EvalConfig.output_dir 写法
+    output_dir = (
+        args.output_dir
+        or output_cfg.get("eval_dir")
+        or eval_cfg.get("output_dir")
+        or os.path.join(_SCRIPT_DIR, "output", "eval")
+    )
 
     try:
         eval_result = evaluate_model(
@@ -767,8 +944,8 @@ def main():
             test_dataset=test_data,
             reward_fn=reward_fn,
             eval_params=eval_params,
-            num_generations=args.num_generations,
-            batch_size=args.batch_size,
+            num_generations=num_generations,
+            batch_size=batch_size,
             device=args.device,
         )
     except Exception as e:

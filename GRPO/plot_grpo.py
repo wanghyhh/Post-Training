@@ -16,14 +16,15 @@ import traceback
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
-# Windows GBK 编码修复
+# Windows 控制台默认 GBK 编码，改为 UTF-8 以正常输出中文。
+# ★ 必须同时开启 line_buffering：手工用 io.TextIOWrapper 重建 stdout 会丢掉
+#   解释器对 tty 的行缓冲属性、退化为块缓冲，导致输出攒到进程结束才一次性涌出。
 if sys.platform == 'win32':
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
 
 # ============================================================
 # 依赖导入区
-# ★ Windows conda 环境 0xC0000005 crash 防护
+# ★ Windows 平台 0xC0000005 crash 防护
 # ============================================================
 import pandas  # noqa: F401
 
