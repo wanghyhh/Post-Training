@@ -1,0 +1,197 @@
+# ====================================================
+# 训练及评估全局配置文件
+# 用途：所有需要在模型读取、训练、评估、绘图中修改的
+#       超参数和路径均在此配置，其余脚本从此读取
+# ====================================================
+
+# ---------- 模型配置 ----------
+ModelConfig:
+  # 预训练模型路径（或 HuggingFace 模型名）
+  model_name_or_path: "D:\\FolderDirectory\\material\\CETC\\SelfProject\\TestPython\\models\\Qwen\\Qwen3-0___6B"
+  # 是否信任远程代码（本地模型设为 false 即可）
+  trust_remote_code: false
+  # 模型加载精度（bfloat16 / float16 / float32）
+  torch_dtype: "bfloat16"
+
+# ---------- 训练器配置 ----------
+# 注意：此命名对象的键名需与 HuggingFace DPOConfig 的参数保持一致，
+#       训练脚本中以 DPOConfig(**TrainConfig) 方式整体传入。
+#       TRL 1.5.1 中以下为支持的全部 DPOConfig 参数。
+TrainConfig:
+  # ===== DPO 核心参数 =====
+  # 偏好强度（温度），值越小越激进，值越大越保守，典型 0.1~0.5
+  beta: 0.1
+  # 偏好损失类型，sigmoid=原版DPO，也可用 ipo / hinge 等
+  loss_type: ["sigmoid"]
+  # 标签平滑系数，缓解偏好数据噪声（0=不平滑）
+  label_smoothing: 0.0
+
+  # ===== 序列长度参数 =====
+  # 最大总长度（prompt+response 的 token 数），超出部分由 truncation_mode 控制截断方向
+  max_length: 512
+  # 超长样本的截断方向：keep_start=保留开头，keep_end=保留末尾
+  truncation_mode: "keep_end"
+
+  # ===== 显存/速度权衡 =====
+  # 预计算参考模型的对数概率（训练前一次性算完并缓存，大幅降低训练期显存，
+  # 但数据或参考模型变更后缓存失效，需重新计算）
+  precompute_ref_log_probs: true
+
+  # ===== 训练策略 =====
+  # 评估策略：epoch 表示每个 epoch 结束时评估；NO 表示不评估
+  eval_strategy: "epoch"
+  # 是否在训练开始前做一次评估
+  eval_on_start: true
+  # 是否在训练结束时加载最佳模型（val指标最优的 checkpoint）
+  load_best_model_at_end: false
+  # 最佳模型指标名称（load_best_model_at_end=true 时生效）
+  metric_for_best_model: "eval_rewards/accuracies"
+  # 指标是否越大越好：准确率类 true，loss 类 false
+  greater_is_better: true
+  # 保存策略：需与 eval_strategy 匹配（同为 epoch 或 steps）
+  save_strategy: "epoch"
+  # 最大保存的 checkpoint 数量
+  save_total_limit: 2
+
+  # ===== Batch & 学习率 =====
+  # 每设备训练 batch size（DPO 每条样本含 chosen+rejected，计算量约为 SFT 两倍）
+  per_device_train_batch_size: 1
+  # 每设备评估 batch size
+  per_device_eval_batch_size: 1
+  # 梯度累积步数
+  gradient_accumulation_steps: 4
+  # 学习率
+  learning_rate: 5.0e-6
+  # 训练 epoch 数
+  num_train_epochs: 3.0
+  # 最大训练步数（设为 -1 表示由 epoch 决定）
+  max_steps: -1
+
+  # ===== 日志与打印 =====
+  # 日志打印步频（每 N 步打印一次 on_log）
+  logging_steps: 1
+  # 每 N 步保存一次（save_strategy=steps 时生效）
+  save_steps: 50
+  # 评估步频（eval_strategy=steps 时生效）
+  eval_steps: null
+  # 随机种子
+  seed: 42
+
+  # ===== 混合精度 =====
+  # 是否使用 bfloat16 混合精度训练
+  bf16: true
+  # 是否使用 float16 混合精度训练
+  fp16: false
+
+  # ===== 优化器 & 学习率调度 =====
+  # 权重衰减
+  weight_decay: 0.0
+  # 预热比例
+  warmup_ratio: 0.1
+  # 学习率调度器类型：linear / cosine / constant 等
+  lr_scheduler_type: "linear"
+  # 是否开启梯度检查点（节省显存）
+  gradient_checkpointing: true
+  # 优化器类型
+  optim: "adamw_torch"
+  # 日志上报方式（空列表=不上报外部平台）
+  report_to: []
+  # 是否禁用 tqdm 进度条（避免 stderr 覆盖 stdout 日志）
+  disable_tqdm: true
+  # 数据加载进程数（0=主进程加载）
+  dataloader_num_workers: 0
+  # 是否移除未使用的列（数据加载后自动丢弃非标准列）
+  remove_unused_columns: true
+
+# ---------- 数据集配置 ----------
+DatasetConfig:
+  # 训练数据集路径（jsonl 文件，每行一个偏好对）
+  train_data_path: "./example_data/data_train.jsonl"
+  # 测试数据集路径（jsonl 文件，每行一个偏好对）
+  test_data_path: "./example_data/data_test.jsonl"
+  # 训练数据使用率（1.0 表示使用 100% 样本）
+  train_data_usage: 1.0
+  # 测试数据使用率（1.0 表示使用 100% 样本）
+  test_data_usage: 1.0
+  # 验证集占比（从训练数据中划分）
+  val_ratio: 0.2
+  # 最大 prompt 长度（在数据预处理阶段对 prompt 文本做截断，
+  # 超过此长度的 prompt 会被 tokenize 后取前 max_prompt_length 个 token 再 decode 回文本）
+  max_prompt_length: 256
+  # 最大回答长度（同上，对 chosen/rejected 的回答文本做截断）
+  max_completion_length: 256
+
+# ---------- LoRA 配置 ----------
+LoraConfig:
+  # LoRA 秩
+  r: 8
+  # LoRA alpha 缩放参数
+  lora_alpha: 16
+  # LoRA dropout 比率
+  lora_dropout: 0.05
+  # 目标模块（Qwen3 标准 attention 模块）
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+  # 是否训练 bias
+  bias: "none"
+  # 任务类型
+  task_type: "CAUSAL_LM"
+
+# ---------- 评估配置 ----------
+EvalConfig:
+  # 待评估的模型路径（与 ModelConfig.model_name_or_path 一致）
+  model_name_or_path: "D:\\FolderDirectory\\material\\CETC\\SelfProject\\TestPython\\models\\Qwen\\Qwen3-0___6B"
+  # DPO 参考模型路径（即训练前的基座权重，评估"相对参考模型视角"时需加载；
+  # 默认与基座模型路径一致）
+  ref_model_name_or_path: "D:\\FolderDirectory\\material\\CETC\\SelfProject\\TestPython\\models\\Qwen\\Qwen3-0___6B"
+  # 测试集路径
+  test_data_path: "./example_data/data_test.jsonl"
+  # 评估 batch size
+  eval_batch_size: 2
+  # 是否评估基座模型
+  eval_base_model: true
+  # 是否评估微调后模型（加载 LoRA 适配器）
+  eval_tuned_model: true
+  # 微调后模型路径（LoRA 适配器保存路径）
+  tuned_model_path: "./output/final_model"
+  # 是否使用 LoRA（加载适配器）
+  use_peft: true
+  # DPO beta 参数，用于计算隐式奖励
+  beta: 0.1
+  # 偏好对展示样例数
+  num_samples_to_show: 3
+  # 测试数据使用率
+  data_usage: 1.0
+
+# ---------- 绘图配置 ----------
+PlotConfig:
+  # 子图列数（控制子图布局换行）
+  subplot_cols: 2
+  # 子图垂直间距
+  hspace: 0.35
+  # 子图水平间距
+  wspace: 0.3
+  # 总标题 Y 轴位置
+  title_y: 1.02
+  # 从第几步开始绘制（跳过前 N 步）
+  start_step: 0
+  # 采样步长（滑动窗口平滑；>1 时启用双层曲线：原始线 alpha=0.2 + 平滑线 alpha=0.8）
+  stride: 1
+  # 输出文件名
+  output_filename: "train_curves.png"
+  # 图像分辨率（DPI）
+  output_dpi: 150
+
+# ---------- 输出目录配置 ----------
+OutputConfig:
+  # 输出根目录
+  output_dir: "./output"
+  # 日志子目录
+  logs_subdir: "logs"
+  # 检查点子目录
+  checkpoints_subdir: "checkpoints"
+  # 最终模型子目录
+  final_model_subdir: "final_model"
+  # 评估报告子目录
+  eval_subdir: "eval"
+  # 绘图子目录
+  plots_subdir: "plots"
